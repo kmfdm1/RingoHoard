@@ -8,15 +8,15 @@ var {Element} = net.sf.ehcache.Element;
 var {ResponseFilter, Headers} = require('ringo/utils/http');
 var {CacheableResponse} = require('./cacheableresponse');
 
-var cacheManager = module.singleton("HoardCacheManager", function() {
+var cacheManager = module.singleton("RingoHoardCacheManager", function() {
    return new CacheManager();
 });
 
-var cache =  module.singleton("HoardCache", function() {
+var cache =  module.singleton("RingoHoardCache", function() {
     return new BlockingCache(cacheManager.getEhcache("hoard"));
 });
 
-exports.middleware = function hoardcache(next, app) {
+exports.middleware = function ringohoard(next, app) {
 
     // communication between app and this middleware
     app.hoardConfig = {
@@ -187,7 +187,7 @@ exports.middleware = function hoardcache(next, app) {
         }
     };
 
-    return function hoardcache(request) {
+    return function ringohoard(request) {
         // we are not a GET-Request? pass through
         // we are not enabled? pass through
         if (!app.hoardConfig.enabled || request.methos != "GET") {
