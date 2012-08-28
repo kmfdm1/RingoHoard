@@ -1,8 +1,12 @@
+addToClasspath("./jars/ehcache-core-2.4.7.jar");
+addToClasspath("./jars/slf4j-api-1.6.1.jar");
+addToClasspath("./jars/slf4j-jdk14-1.6.1.jar");
 
 var {BlockingCache} = net.sf.ehcache.constructs.blocking;
 var {CacheManager} = net.sf.ehcache;
 var {Element} = net.sf.ehcache.Element;
 var {ResponseFilter, Headers} = require('ringo/utils/http');
+var {CacheableResponse} = require('./cacheableresponse');
 
 var cacheManager = module.singleton("HoardCacheManager", function() {
    return new CacheManager();
@@ -14,7 +18,7 @@ var cache =  module.singleton("HoardCache", function() {
 
 exports.middleware = function hoardcache(next, app) {
 
-    // comunication between app and this middleware
+    // communication between app and this middleware
     app.hoardConfig = {
         'enabled': true,
         'defaultTTL': 10,
@@ -32,13 +36,6 @@ exports.middleware = function hoardcache(next, app) {
             return app.hoardConfig.cacheKeyFactory(request);
         }
         return request.scriptName + request.pathInfo + "?" + request.queryString;
-    };
-    
-    /**
-     * check if the given CacheableResponse is expired
-     */
-    var isExpired = function(cr) {
-        return new Date().getTime() > cr.validUntil;
     };
     
     /**
@@ -93,13 +90,14 @@ exports.middleware = function hoardcache(next, app) {
      * gziped: the body of the gziped response
      */
     var createCacheableResponse = function(response, ttl) {
-        var cr = {'validUntil': new Date(new Date().getTime() + ttl * 1000),
-                 'headers': {},
-                 'plain': {}};
-        cr.headers = filterHeaders(response.headers);
-        cr.plain = response.body;
+        var cr = new CachableResponse();
+        cr.touch(ttl);
+        var headers = filterHeaders(response.headers);
+        headers['x-cache'] = 'HIT from '; // FIXME: server
+        cr.setHeaders(headers);
+        cr.setPlainBody(response.body);
         if (useGzip(null, response)) {
-            cr.gziped = gzip(cr.plain);
+            cr.setGzipedBody(gzip(cr.plain));
         }
         return cr;
     };
@@ -123,29 +121,30 @@ exports.middleware = function hoardcache(next, app) {
     };
 
     /**
-     * take the cacheableresponse and return either the plain response or the gziped
+     * take the cacheable response and return either the plain response or the gziped
      * response ready to return to the next in the jsgi-chain
      */
     var serviceCacheElement = function (request, cr) {
         if (useGzip(request, cr) && cr.gziped && cr.gziped.body) {
-            var headers = cr.headers;
-            headers.content-encoding = 'gzip';
+            var headers = cr.getHeaders();
+            headers['content-encoding'] = 'gzip';
+            headers[''] = '';
             return {
-                "status": cr.status,
+                "status": cr.getStatus(),
                 "headers": headers,
-                "body": new ResponseFilter(cr.gziped.body, function(part) {
+                "body": new ResponseFilter(cr.getGzipedBody(), function(part) {
                     return part;
                 })
             };
         }
         return {
-            "status": cr.status,
-            "headers": cr.headers,
-            "body": new ResponseFilter(cr.plain.body, function(part) {
+            "status": cr.getStatus(),
+            "headers": cr.getHeaders(),
+            "body": new ResponseFilter(cr.getPlainBody(), function(part) {
                 return part;
             })
         };
-    }
+    };
 
     /**
      * We have a cache miss
@@ -158,27 +157,27 @@ exports.middleware = function hoardcache(next, app) {
             
             // request is cacheable
             if (ttl > 0) {
-                response = blockingService(request), headers = Headers(response.headers);
+                response = blockingService(request), headers = new Headers(response.headers);
                 // everything below 200 and above 399 - except 404 - will not be cached.
                 if (response.status != 404 && (response.status < 200 || response.status >= 400)) {
                     return response;
                 }
-                var ttl = getTTLforStatusCode(response.status);
+                ttl = getTTLforStatusCode(response.status);
                 
                 // response is cacheable
                 if (ttl > 0) {
-                    headers.set("X-Cache", "MISS from " + request.host);
+                    headers.set("x-cache", "MISS from " + request.host);
                     // FIXME: request.host .. should be something like the real hostname
                     var cr = createCacheableResponse(response, ttl);
-                    ce = new Element(key, cr);
+                    ce = new Element(key, cr.getData());
                     response = serviceCacheElement(request, cr);
                 } else {
                     // response uncachable
                     ce = new Element(key, null);
                 }
             } else {
-                response = blockingService(request), headers = Headers(response.headers);
-                headers.set("X-Cache", "NO Cache from " + request.host);
+                response = blockingService(request), headers = new Headers(response.headers);
+                headers.set("x-cache", "NO Cache from " + request.host);
                 ce = new Element(key, null);
             }
             cache.put(ce);
@@ -186,7 +185,6 @@ exports.middleware = function hoardcache(next, app) {
         } catch (e) {
             cache.put(new Element(key, null));
         }
-        return;
     };
 
     return function hoardcache(request) {
@@ -214,25 +212,22 @@ exports.middleware = function hoardcache(next, app) {
             }
             if (!element || element.getValue() == null) {
                 // no element in cache -> service cacheMiss
-                // FIXME: look into it how other requests may wait for this to finish and use the same response for themselve
+                // FIXME: look into it how other requests may wait for this to finish and use the same response for themselves
                 return serviceCacheMiss(request, key);
             } else {
-                var cr;
+                var cr, expired;
                 sync(function () {
-                    cr = unwrapCacheElement(element);
-                    if (isExpired(cr)) {
+                    cr = new CacheableRsponse(element.getObjectValue());
+                    expired = cr.isExpired();
+                    if (expired) {
                        // touch the cachableResou
-                       cr.validUntil = new Date().getTime() + 10000;
+                       cr.touch();
                     }
                 }, element);
-                var cr = element.getObjectValue().parseJSON();
-                // FIXME: synchronize.. how?
-                if (isExpired(cr) {
-                    cr.touch();
-                    return serviceCacheMiss(request, response, key);
-                } else {
-                    return serviceCacheElement(request, cr);
+                if (expired) {
+                    return serviceCacheMiss(request, key);
                 }
+                return serviceCacheElement(request, cr);
             }
             
         }
