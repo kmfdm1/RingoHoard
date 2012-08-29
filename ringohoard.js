@@ -4,7 +4,7 @@ addToClasspath("./jars/slf4j-jdk14-1.6.1.jar");
 
 var {BlockingCache} = net.sf.ehcache.constructs.blocking;
 var {CacheManager} = net.sf.ehcache;
-var {Element} = net.sf.ehcache.Element;
+var {Element} = net.sf.ehcache;
 var {ResponseFilter, Headers} = require('ringo/utils/http');
 var {CacheableResponse} = require('./cacheableresponse');
 
