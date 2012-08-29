@@ -1,19 +1,25 @@
-addToClasspath("./jars/ehcache-core-2.4.7.jar");
-addToClasspath("./jars/slf4j-api-1.6.1.jar");
-addToClasspath("./jars/slf4j-jdk14-1.6.1.jar");
+addToClasspath("./jars/ehcache-core-2.6.0.jar");
+// addToClasspath("./jars/slf4j-api-1.6.1.jar");
+//addToClasspath("./jars/slf4j-jdk14-1.6.1.jar");
 
 var {BlockingCache} = net.sf.ehcache.constructs.blocking;
 var {CacheManager} = net.sf.ehcache;
-var {Element} = net.sf.ehcache;
+var {Element, Cache} = net.sf.ehcache;
 var {ResponseFilter, Headers} = require('ringo/utils/http');
 var {CacheableResponse} = require('./cacheableresponse');
+var log = require("ringo/logging").getLogger("ringohoard");
 
 var cacheManager = module.singleton("RingoHoardCacheManager", function() {
    return new CacheManager();
 });
 
 var cache =  module.singleton("RingoHoardCache", function() {
-    return new BlockingCache(cacheManager.getEhcache("hoard"));
+    var cache = cacheManager.getEhcache("hoard");
+    if (!cache) {
+        cache = new Cache("hoard", 10000, false, true, 0, 0);
+        cacheManager.addCache(cache);
+    }
+    return new BlockingCache(cache);
 });
 
 exports.middleware = function ringohoard(next, app) {
@@ -33,9 +39,9 @@ exports.middleware = function ringohoard(next, app) {
      */
     var constructKey = function (request) {
         if (app.hoardConfig.cacheKeyFactory) {
-            return app.hoardConfig.cacheKeyFactory(request);
+            return new java.lang.Sring(app.hoardConfig.cacheKeyFactory(request));
         }
-        return request.scriptName + request.pathInfo + "?" + request.queryString;
+        return new java.lang.String(request.scriptName + request.pathInfo + "?" + request.queryString);
     };
     
     /**
@@ -150,14 +156,14 @@ exports.middleware = function ringohoard(next, app) {
      * We have a cache miss
      */
     var serviceCacheMiss = function(request, key) {
+        var response = next(request);
         try {
             var ce;
-            var response;
             var ttl = getTTLforRequest(request);
             
             // request is cacheable
             if (ttl > 0) {
-                response = blockingService(request), headers = new Headers(response.headers);
+                //response = blockingService(request), headers = new Headers(response.headers);
                 // everything below 200 and above 399 - except 404 - will not be cached.
                 if (response.status != 404 && (response.status < 200 || response.status >= 400)) {
                     return response;
@@ -173,25 +179,28 @@ exports.middleware = function ringohoard(next, app) {
                     response = serviceCacheElement(request, cr);
                 } else {
                     // response uncachable
-                    ce = new Element(key, null);
+                    ce = new Element(key, null, true, 0, 0);
                 }
             } else {
                 response = blockingService(request), headers = new Headers(response.headers);
                 headers.set("x-cache", "NO Cache from " + request.host);
-                ce = new Element(key, null);
+                ce = new Element(key, null, true, 0, 0);
             }
             cache.put(ce);
             return response;
         } catch (e) {
-            cache.put(new Element(key, null));
+            log.error("exception while servicing cache-miss: " + e);
+            cache.put(new Element(key, null, true, 0, 0));
         }
     };
 
-    return function ringohoard(request) {
+    var handle = function(request) {
         // we are not a GET-Request? pass through
         // we are not enabled? pass through
-        if (!app.hoardConfig.enabled || request.methos != "GET") {
-            return next(request);
+        if (!app.hoardConfig.enabled || request.method != "GET") {
+            log.info("no ringohoard: " + app.hoardConfig.enabled + "/" + request.method);
+            var res = next(request);
+            return res;
         }
 
         if (false) {
@@ -200,9 +209,11 @@ exports.middleware = function ringohoard(next, app) {
             var key = constructKey(request);
             var element;
             try {
+                log.info("key: " + key);
                 element = cache.get(key);
             } catch (e) {
                 // FIXME: check if it is a LockTimeoutException
+                log.info("exception while cache.get(): " + e);
                 return {
                     'status': 302,
                     'headers': {
@@ -213,6 +224,7 @@ exports.middleware = function ringohoard(next, app) {
             if (!element || element.getValue() == null) {
                 // no element in cache -> service cacheMiss
                 // FIXME: look into it how other requests may wait for this to finish and use the same response for themselves
+                log.info("Service cacheMiss (no element at all)");
                 return serviceCacheMiss(request, key);
             } else {
                 var cr, expired;
@@ -220,17 +232,25 @@ exports.middleware = function ringohoard(next, app) {
                     cr = new CacheableRsponse(element.getObjectValue());
                     expired = cr.isExpired();
                     if (expired) {
-                       // touch the cachableResou
+                       // touch the cachableResponse
                        cr.touch();
                     }
                 }, element);
                 if (expired) {
+                    log.info("Service cacheMiss (element expired)");
                     return serviceCacheMiss(request, key);
                 }
+                log.info("Service cache hit");
                 return serviceCacheElement(request, cr);
             }
-            
+
         }
+    };
+
+    return function ringohoard(request) {
+        var res = handle(request);
+        log.info(res.toSource());
+        return res;
     };
 };
 
