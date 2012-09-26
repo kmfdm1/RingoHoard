@@ -115,7 +115,6 @@ exports.middleware = function ringohoard(next, app) {
      * gzip the data given and return it as ByteString
      */
     var gzip = function(data) {
-        log.info("gziping: " + data);
         var bytes = new ByteArrayOutputStream(),
             gzip = new GZIPOutputStream(bytes);
         if (!(data instanceof Binary)) {
@@ -155,7 +154,6 @@ exports.middleware = function ringohoard(next, app) {
      */
     var serviceCacheMiss = function(request, key) {
         var response = next(request);
-        log.info("orig: " + response.toSource());
         try {
             var ce;
             var ttl = getTTLforRequest(request);
@@ -192,7 +190,7 @@ exports.middleware = function ringohoard(next, app) {
         }
     };
 
-    var handle = function(request) {
+    return function ringohoard(request) {
         // we are not a GET-Request? pass through
         // we are not enabled? pass through
         if (!app.hoardConfig.enabled || request.method != "GET") {
@@ -206,7 +204,6 @@ exports.middleware = function ringohoard(next, app) {
             var key = constructKey(request);
             var element;
             try {
-                log.info("key: " + key);
                 element = cache.get(key);
             } catch (e) {
                 // FIXME: check if it is a LockTimeoutException
@@ -233,7 +230,6 @@ exports.middleware = function ringohoard(next, app) {
                         cr.touch();
                     }
                 }, element)();
-                log.info("after sync");
                 if (expired) {
                     log.info("Service cacheMiss (element expired)");
                     return serviceCacheMiss(request, key);
@@ -243,12 +239,6 @@ exports.middleware = function ringohoard(next, app) {
             }
 
         }
-    };
-
-    return function ringohoard(request) {
-        var res = handle(request);
-        log.info("after Cache: " + res.toSource());
-        return res;
     };
 };
 
