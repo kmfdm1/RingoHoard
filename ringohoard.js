@@ -2,6 +2,9 @@ addToClasspath("./jars/ehcache-core-2.6.0.jar");
 // addToClasspath("./jars/slf4j-api-1.6.1.jar");
 //addToClasspath("./jars/slf4j-jdk14-1.6.1.jar");
 
+var {ByteArrayOutputStream} = java.io;
+var {ByteString} = require('binary');
+var {GZIPOutputStream} = java.util.zip;
 var {BlockingCache} = net.sf.ehcache.constructs.blocking;
 var {CacheManager} = net.sf.ehcache;
 var {Element, Cache} = net.sf.ehcache;
@@ -9,10 +12,16 @@ var {ResponseFilter, Headers} = require('ringo/utils/http');
 var {CacheableResponse} = require('./cacheableresponse');
 var log = require("ringo/logging").getLogger("ringohoard");
 
+/**
+ * get the singleton cacheManager
+ */
 var cacheManager = module.singleton("RingoHoardCacheManager", function() {
    return new CacheManager();
 });
 
+/**
+ * get the singleton cache holding all cache-objects
+ */
 var cache =  module.singleton("RingoHoardCache", function() {
     var cache = cacheManager.getEhcache("hoard");
     if (!cache) {
@@ -27,7 +36,7 @@ exports.middleware = function ringohoard(next, app) {
     // communication between app and this middleware
     app.hoardConfig = {
         'enabled': true,
-        'defaultTTL': 10,
+        'defaultTTL': 60,
         'contentTypes': /^text|xml|json|javascript/
     };
 
@@ -48,10 +57,12 @@ exports.middleware = function ringohoard(next, app) {
      * check if the request and response allow a gziped delivery
      */
     var useGzip = function(request, cr) {
-        return cr.status == 200 &&
-               !cr.headers.content-encoding &&
-               cr.headers.content-type.match(app.hoardConfig.contentTypes) &&
-               (!request || request.headers.accept-encoding.indexOf("gzip") > -1);
+        var status = cr.getStatus();
+        var headers = cr.getHeaders();
+        return (status == 200 || status == 404) &&
+               !headers["content-encoding"] &&
+               app.hoardConfig.contentTypes.test(headers["content-type"]) &&
+               (!request || request.headers["accept-encoding"].indexOf("gzip") > -1);
     };
     
     /**
@@ -66,7 +77,7 @@ exports.middleware = function ringohoard(next, app) {
         var skipHeaders = ["cookies"];
         var filtered = {};
         for (var i in headers) {
-            if (skipHeaders.contains(i)) {
+            if (skipHeaders.indexOf(i) > -1) {
                continue;
             }
             filtered[i] = headers[i];
@@ -78,32 +89,24 @@ exports.middleware = function ringohoard(next, app) {
      * return the ttl determined by the requested resource
      */ 
     var getTTLforRequest = function(request, response) {
-       return app.hoardConfig.defaultTTL; // FIXME: make it a lookup
+       return app.hoardConfig.defaultTTL * 1000; // FIXME: make it a lookup
     };
     
     /** 
      * return the ttl determined by the statuscode of the response
      */
     var getTTLforStatusCode = function(status) {
-       return app.hoardConfig.defaultTTL; // FIXME: make it a lookup
+       return app.hoardConfig.defaultTTL * 1000; // FIXME: make it a lookup
     };
 
     /**
-     * create the basic structure of a cacheable response
-     * validUntil: millis of expire-timestamp
-     * headers: object containing all headers (except the "content-encoding: gziped" which has to be set if gziped content is used for delivery 
-     * plain: the body of the plain response
-     * gziped: the body of the gziped response
+     * create a new instance of cacheablersponse
      */
     var createCacheableResponse = function(response, ttl) {
-        var cr = new CachableResponse();
+        var cr = CacheableResponse.createFromResponse(response.status, filterHeaders(response.headers), response.body);
         cr.touch(ttl);
-        var headers = filterHeaders(response.headers);
-        headers['x-cache'] = 'HIT from '; // FIXME: server
-        cr.setHeaders(headers);
-        cr.setPlainBody(response.body);
-        if (useGzip(null, response)) {
-            cr.setGzipedBody(gzip(cr.plain));
+        if (useGzip(null, cr)) {
+            cr.setGzipedBody(gzip("" + cr.getPlainBody()));
         }
         return cr;
     };
@@ -112,18 +115,17 @@ exports.middleware = function ringohoard(next, app) {
      * gzip the data given and return it as ByteString
      */
     var gzip = function(data) {
+        log.info("gziping: " + data);
         var bytes = new ByteArrayOutputStream(),
             gzip = new GZIPOutputStream(bytes);
         if (!(data instanceof Binary)) {
             data = data.toByteString();
         }
         gzip.write(data);
-        if (bytes.size() > 1024) {
-            var zipped = bytes.toByteArray();
-            bytes.reset();
-            return new ByteString(zipped);
-        }
-        return null;
+        gzip.finish();
+        var zipped = bytes.toByteArray();
+        bytes.reset();
+        return zipped;
     };
 
     /**
@@ -131,24 +133,20 @@ exports.middleware = function ringohoard(next, app) {
      * response ready to return to the next in the jsgi-chain
      */
     var serviceCacheElement = function (request, cr) {
-        if (useGzip(request, cr) && cr.gziped && cr.gziped.body) {
-            var headers = cr.getHeaders();
+        var headers = cr.getHeaders();
+        headers['x-cache'] = 'HIT from '; // FIXME: add none-virtual real hostname
+        if (useGzip(request, cr) && cr.hasGzipedBody()) {
             headers['content-encoding'] = 'gzip';
-            headers[''] = '';
             return {
                 "status": cr.getStatus(),
                 "headers": headers,
-                "body": new ResponseFilter(cr.getGzipedBody(), function(part) {
-                    return part;
-                })
+                "body": cr.getGzipedBody()
             };
         }
         return {
             "status": cr.getStatus(),
-            "headers": cr.getHeaders(),
-            "body": new ResponseFilter(cr.getPlainBody(), function(part) {
-                return part;
-            })
+            "headers": headers,
+            "body": cr.getPlainBody()
         };
     };
 
@@ -157,33 +155,33 @@ exports.middleware = function ringohoard(next, app) {
      */
     var serviceCacheMiss = function(request, key) {
         var response = next(request);
+        log.info("orig: " + response.toSource());
         try {
             var ce;
             var ttl = getTTLforRequest(request);
             
             // request is cacheable
             if (ttl > 0) {
-                //response = blockingService(request), headers = new Headers(response.headers);
                 // everything below 200 and above 399 - except 404 - will not be cached.
                 if (response.status != 404 && (response.status < 200 || response.status >= 400)) {
                     return response;
                 }
+
                 ttl = getTTLforStatusCode(response.status);
-                
                 // response is cacheable
                 if (ttl > 0) {
-                    headers.set("x-cache", "MISS from " + request.host);
                     // FIXME: request.host .. should be something like the real hostname
                     var cr = createCacheableResponse(response, ttl);
-                    ce = new Element(key, cr.getData());
+                    ce = new Element(key, cr.data);
                     response = serviceCacheElement(request, cr);
+                    response.headers["x-cache"] = "MISS from " + request.host; // FIXME: use none-virtual real hostname
                 } else {
                     // response uncachable
                     ce = new Element(key, null, true, 0, 0);
                 }
             } else {
-                response = blockingService(request), headers = new Headers(response.headers);
-                headers.set("x-cache", "NO Cache from " + request.host);
+                // response is not cacheable
+                response.headers.set("x-cache", "Uncached from " + request.host); // FIXME: use real, none-virtual hostname
                 ce = new Element(key, null, true, 0, 0);
             }
             cache.put(ce);
@@ -198,9 +196,8 @@ exports.middleware = function ringohoard(next, app) {
         // we are not a GET-Request? pass through
         // we are not enabled? pass through
         if (!app.hoardConfig.enabled || request.method != "GET") {
-            log.info("no ringohoard: " + app.hoardConfig.enabled + "/" + request.method);
-            var res = next(request);
-            return res;
+            log.debug("no ringohoard: " + app.hoardConfig.enabled + "/" + request.method);
+            return next(request);
         }
 
         if (false) {
@@ -229,13 +226,14 @@ exports.middleware = function ringohoard(next, app) {
             } else {
                 var cr, expired;
                 sync(function () {
-                    cr = new CacheableRsponse(element.getObjectValue());
+                    cr = new CacheableResponse(element.getObjectValue());
                     expired = cr.isExpired();
                     if (expired) {
-                       // touch the cachableResponse
-                       cr.touch();
+                        // touch the cachableResponse
+                        cr.touch();
                     }
-                }, element);
+                }, element)();
+                log.info("after sync");
                 if (expired) {
                     log.info("Service cacheMiss (element expired)");
                     return serviceCacheMiss(request, key);
@@ -249,7 +247,7 @@ exports.middleware = function ringohoard(next, app) {
 
     return function ringohoard(request) {
         var res = handle(request);
-        log.info(res.toSource());
+        log.info("after Cache: " + res.toSource());
         return res;
     };
 };
