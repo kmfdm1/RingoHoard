@@ -1,65 +1,75 @@
 var {Integer, Long, System} = java.lang;
+var {ByteString} = require('binary');
 
 export("CacheableResponse");
 
 var CacheableResponse = function (cacheValue) {
-    var data = cacheValue;
-    if (!data) {
-        data = new java.lang.Object[4];
+    if (!cacheValue) {
+        this.data = new java.lang.reflect.Array.newInstance(java.lang.Object, 5);
+    } else {
+        this.data = cacheValue;
     }
 };
 
+CacheableResponse.FIELD_TTL = 0;
+CacheableResponse.FIELD_STATUS = 1;
+CacheableResponse.FIELD_HEADERS = 2;
+CacheableResponse.FIELD_PLAIN_BODY = 3;
+CacheableResponse.FIELD_GZIPED_BODY = 4;
+
+
+CacheableResponse.createFromResponse = function(status, headers, body) {
+    var cr = new CacheableResponse();
+    cr.setStatus(status);
+    cr.setHeaders(headers);
+    cr.setPlainBody(body);
+    return cr;
+};
 
 CacheableResponse.prototype.isExpired = function() {
-    if (!data[0]) {
+    var ttl = this.data[CacheableResponse.FIELD_TTL];
+    if (!ttl) {
         return true;
     }
-    return System.currentTimeMillis() > data[0].longValue();
+    return System.currentTimeMillis() > ttl;
 };
 
 CacheableResponse.prototype.touch = function(ttl) {
-    if (ttl && ttl instanceof Number && ttl > 0) {
-        data[0] = new Long(System.currentTimeMillis() + ttl);
-        return;
-    }
-    data[0] = new Long(System.currentTimeMillis() + 10000);
+    this.data[CacheableResponse.FIELD_TTL] = new Long(System.currentTimeMillis() + (ttl || 10000));
 };
 
-CacheableResponse.prototype.setStatus = function() {
-    data[1] = new Integer(status);
+CacheableResponse.prototype.setStatus = function(status) {
+    this.data[CacheableResponse.FIELD_STATUS] = new java.lang.String(status);
 };
 
 CacheableResponse.prototype.getStatus = function() {
-    return data[1].intValue();
+    return this.data[CacheableResponse.FIELD_STATUS];
 };
 
 CacheableResponse.prototype.setHeaders = function(headers) {
-    data[2] = headers.toJSON();
+    this.data[CacheableResponse.FIELD_HEADERS] = new java.lang.String(JSON.stringify(headers));
 };
 
 CacheableResponse.prototype.getHeaders = function() {
-    if (!data[2]) {
-        return null;
-    }
-    return data[2].parseJSON();
+    return JSON.parse(this.data[CacheableResponse.FIELD_HEADERS]);
 };
 
 CacheableResponse.prototype.setPlainBody = function(body) {
-    data[3] = body;
+    this.data[CacheableResponse.FIELD_PLAIN_BODY] = new java.lang.String(JSON.stringify(body));
 };
 
 CacheableResponse.prototype.getPlainBody = function(body) {
-    return data[3];
+    return JSON.parse(this.data[CacheableResponse.FIELD_PLAIN_BODY]);
 };
 
 CacheableResponse.prototype.setGzipedBody = function(body) {
-    data[4] = body;
+    this.data[CacheableResponse.FIELD_GZIPED_BODY] = body;
 };
 
 CacheableResponse.prototype.getGzipedBody = function(body) {
-    return data[4];
+    return [new ByteString(this.data[CacheableResponse.FIELD_GZIPED_BODY])];
 };
 
-CacheableResponse.prototype.getData = function() {
-    return data;
+CacheableResponse.prototype.hasGzipedBody = function() {
+    return this.data[CacheableResponse.FIELD_GZIPED_BODY] !== null;
 };
